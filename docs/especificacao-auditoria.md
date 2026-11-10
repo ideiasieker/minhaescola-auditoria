@@ -53,12 +53,12 @@ Regras:
 - Na ingestão, dentro de uma transação: trava a cabeça da cadeia (`SELECT … FOR UPDATE` em `cadeia_cabeca`), atribui `seq = ultimo_seq + 1`, calcula `hash = sha256(hash_anterior || jsonb_canonico(registro))`, insere, atualiza a cabeça.
 - A ordem da cadeia é a **ordem de chegada**, não `ocorrido_em` (eventos podem chegar fora de ordem pelo outbox). Os dois campos são guardados.
 - Verificação: job diário recalcula as cadeias do dia; resultado gravado em `verificacao_cadeia`. Falha = alerta crítico.
-- Âncora externa (recomendado): o hash da cabeça de cada cadeia é publicado diariamente no storage externo com retenção bloqueada (object lock). Isso prova que nem quem administra o servidor reescreveu a cadeia inteira.
+- Âncora externa (recomendado): o hash da cabeça de cada cadeia é publicado diariamente na biblioteca do SharePoint com política de retenção (versões não podem ser apagadas). Isso prova que nem quem administra o servidor reescreveu a cadeia inteira.
 
 ## 5. Imutabilidade no banco
 - Tabela `registro` particionada por mês (`ocorrido_em` de chegada).
 - Role da aplicação: só `INSERT` e `SELECT`. Gatilho bloqueia `UPDATE`/`DELETE` para qualquer role.
-- Partições com mais de 5 anos: exportadas (arquivo assinado no storage externo) e só então removidas por procedimento manual com dupla autorização.
+- Partições com mais de 5 anos: exportadas (arquivo assinado, cifrado, no SharePoint) e só então removidas por procedimento manual com dupla autorização.
 
 ## 6. Dados pessoais e anonimização (lacuna L-LGPD-04)
 - Campos pessoais do payload chegam **cifrados** pelo produtor com uma chave por titular (`chave_titular`, guardada no banco da escola, cifrada pela chave mestra).
@@ -73,7 +73,7 @@ Regras:
 
 ## 8. Falhas
 - Auditoria fora do ar ⇒ a escola **continua funcionando**; eventos acumulam no outbox. Alerta se o outbox tiver evento com mais de 5 minutos sem entrega.
-- Banco da auditoria tem backup próprio (pgBackRest, repositório separado no storage externo).
+- Banco da auditoria tem backup próprio (pgBackRest, repositório separado sincronizado com o SharePoint).
 
 ## 9. Estrutura do repositório
 ```
