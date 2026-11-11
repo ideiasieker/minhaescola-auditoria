@@ -2,25 +2,56 @@
 # SEM domínio: ninguém de fora alcança. A escola fala com `auditoria-api:3100` pela rede
 # externa `minhaescola-auditoria` (criar uma vez: docker network create minhaescola-auditoria).
 # Segredos no painel "Environment" (modelo em deploy/easypanel.env.example).
+# pgBackRest (tarefa 0.27): mesma imagem do banco da escola (ghcr.io/ideiasieker/minhaescola-postgres).
+# A cópia cifrada para o OneDrive é feita pelo serviço backup-remoto da escola, que monta o volume
+# minhaescola-auditoria-backup (por isso a auditoria sobe antes da escola).
+x-pgbackrest: &pgbackrest
+  PGBACKREST_STANZA: auditoria
+  PGBACKREST_PG1_PATH: /var/lib/postgresql/data
+  PGBACKREST_PG1_SOCKET_PATH: /var/run/postgresql
+  PGBACKREST_REPO1_PATH: /backup/repo
+  PGBACKREST_REPO1_RETENTION_FULL: '4'
+  PGBACKREST_COMPRESS_TYPE: zst
+  PGBACKREST_START_FAST: 'y'
+  PGBACKREST_LOG_LEVEL_CONSOLE: info
+
+x-imagem-postgres: &imagem-postgres ghcr.io/ideiasieker/minhaescola-postgres:${IMAGEM_POSTGRES:?defina IMAGEM_POSTGRES}
+
 x-imagem: &imagem ghcr.io/ideiasieker/minhaescola-auditoria:${IMAGEM_TAG:?defina IMAGEM_TAG}
 
 services:
   auditoria-db:
-    image: postgres:17
+    image: *imagem-postgres
     restart: unless-stopped
     environment:
+      <<: *pgbackrest
       POSTGRES_DB: auditoria
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${SENHA_POSTGRES:?}
       SENHA_MIGRADOR: ${SENHA_MIGRADOR:?}
       SENHA_APP: ${SENHA_APP:?}
       SENHA_VERIFICADOR: ${SENHA_VERIFICADOR:?}
-    command: ['postgres', '-c', 'shared_buffers=64MB', '-c', 'max_connections=30', '-c', 'wal_level=replica']
+    command:
+      - postgres
+      - -c
+      - shared_buffers=64MB
+      - -c
+      - max_connections=30
+      - -c
+      - wal_level=replica
+      - -c
+      - archive_mode=on
+      - -c
+      - archive_command=pgbackrest --stanza=auditoria archive-push %p
+      - -c
+      - archive_timeout=60
     configs:
       - source: roles
         target: /docker-entrypoint-initdb.d/00-roles.sh
     volumes:
       - auditoria-db:/var/lib/postgresql/data
+      - pg-socket:/var/run/postgresql
+      - backup:/backup
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U postgres -d auditoria']
       interval: 5s
@@ -29,6 +60,24 @@ services:
     deploy:
       resources:
         limits: { memory: 192M }
+
+  # Backups completos (domingo) e diferenciais (outros dias), 03h UTC. O WAL vai pelo archive_command.
+  backup:
+    image: *imagem-postgres
+    restart: unless-stopped
+    user: postgres
+    depends_on:
+      auditoria-db: { condition: service_healthy }
+    environment:
+      <<: *pgbackrest
+    entrypoint: ['/usr/local/bin/entrada-backup.sh']
+    volumes:
+      - auditoria-db:/var/lib/postgresql/data
+      - pg-socket:/var/run/postgresql
+      - backup:/backup
+    deploy:
+      resources:
+        limits: { memory: 128M }
 
   migrar:
     image: *imagem
@@ -77,6 +126,10 @@ networks:
 
 volumes:
   auditoria-db:
+  pg-socket:
+  # Nome fixo: o backup-remoto da escola monta este volume para copiar ao OneDrive.
+  backup:
+    name: minhaescola-auditoria-backup
 
 configs:
   roles:
