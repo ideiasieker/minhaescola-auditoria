@@ -1,0 +1,59 @@
+# CI da auditoria: lint, tipos, testes (unitários e com Postgres) e, na main, imagem no GHCR.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  testes:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: dev_postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      TESTE_ADMIN_DATABASE_URL: postgres://postgres:dev_postgres@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run test:banco
+
+  imagem:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [testes]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - run: echo "TAG=sha-${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/ideiasieker/minhaescola-auditoria:${{ env.TAG }}

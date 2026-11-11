@@ -1,0 +1,95 @@
+# minhaescola-auditoria no Easypanel (tarefa 0.26). Serviço "Compose" no projeto minhaescola.
+# SEM domínio: ninguém de fora alcança. A escola fala com `auditoria-api:3100` pela rede
+# externa `minhaescola-auditoria` (criar uma vez: docker network create minhaescola-auditoria).
+# Segredos no painel "Environment" (modelo em deploy/easypanel.env.example).
+x-imagem: &imagem ghcr.io/ideiasieker/minhaescola-auditoria:${IMAGEM_TAG:?defina IMAGEM_TAG}
+
+services:
+  auditoria-db:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: auditoria
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${SENHA_POSTGRES:?}
+      SENHA_MIGRADOR: ${SENHA_MIGRADOR:?}
+      SENHA_APP: ${SENHA_APP:?}
+      SENHA_VERIFICADOR: ${SENHA_VERIFICADOR:?}
+    command: ['postgres', '-c', 'shared_buffers=64MB', '-c', 'max_connections=30', '-c', 'wal_level=replica']
+    configs:
+      - source: roles
+        target: /docker-entrypoint-initdb.d/00-roles.sh
+    volumes:
+      - auditoria-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U postgres -d auditoria']
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    deploy:
+      resources:
+        limits: { memory: 192M }
+
+  migrar:
+    image: *imagem
+    restart: 'no'
+    depends_on:
+      auditoria-db: { condition: service_healthy }
+    environment:
+      AUDITORIA_MIGRADOR_DATABASE_URL: postgres://auditoria_migrador:${SENHA_MIGRADOR}@auditoria-db:5432/auditoria
+    command: ['node_modules/.bin/tsx', 'src/banco/migrar.ts']
+
+  # Sobe antes da API e depois 1x por dia: cria partições do mês e verifica as cadeias.
+  verificador:
+    image: *imagem
+    restart: unless-stopped
+    depends_on:
+      migrar: { condition: service_completed_successfully }
+    environment:
+      AUDITORIA_VERIFICADOR_DATABASE_URL: postgres://auditoria_verificador:${SENHA_VERIFICADOR}@auditoria-db:5432/auditoria
+    command: ['sh', '-c', 'while true; do node_modules/.bin/tsx src/verificador/main.ts; sleep 86400; done']
+    deploy:
+      resources:
+        limits: { memory: 128M }
+
+  auditoria-api:
+    image: *imagem
+    restart: unless-stopped
+    depends_on:
+      migrar: { condition: service_completed_successfully }
+    environment:
+      AUDITORIA_DATABASE_URL: postgres://auditoria_app:${SENHA_APP}@auditoria-db:5432/auditoria
+      AUDITORIA_TOKENS: ${AUDITORIA_TOKENS:?}
+      PORTA: '3100'
+      NODE_OPTIONS: --max-old-space-size=96
+    networks:
+      default: {}
+      escola:
+        aliases: [auditoria-api]
+    deploy:
+      resources:
+        limits: { memory: 160M }
+
+networks:
+  escola:
+    name: minhaescola-auditoria
+    external: true
+
+volumes:
+  auditoria-db:
+
+configs:
+  roles:
+    content: |
+      #!/bin/sh
+      set -eu
+      psql -v ON_ERROR_STOP=1 -U postgres -d auditoria \
+        -v smig="$$SENHA_MIGRADOR" -v sapp="$$SENHA_APP" -v sver="$$SENHA_VERIFICADOR" <<'SQL'
+      CREATE ROLE auditoria_owner NOLOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;
+      CREATE ROLE auditoria_migrador LOGIN PASSWORD :'smig' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE IN ROLE auditoria_owner;
+      CREATE ROLE auditoria_app LOGIN PASSWORD :'sapp' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;
+      CREATE ROLE auditoria_verificador LOGIN PASSWORD :'sver' NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;
+      GRANT CREATE, CONNECT ON DATABASE auditoria TO auditoria_owner;
+      GRANT CONNECT ON DATABASE auditoria TO auditoria_migrador, auditoria_app, auditoria_verificador;
+      REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+      SQL
