@@ -1,0 +1,13 @@
+# Desenvolvimento local. Produção (rede interna, sem porta publicada): tarefa 0.26.
+services:
+  auditoria-db:
+    image: postgres:17
+    environment:
+      POSTGRES_PASSWORD: dev_postgres
+      POSTGRES_DB: auditoria
+    ports: ['55433:5432']
+    volumes:
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+      - auditoria-db:/var/lib/postgresql/data
+volumes:
+  auditoria-db:
